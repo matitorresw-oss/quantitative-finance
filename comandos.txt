@@ -1,0 +1,20 @@
+# crear ambiente virtual
+
+python3 -m venv .venv
+
+#activar ambiente virtual 
+source .venv/bin/activate
+
+#instalar librerias
+pip3 install -r requirements.txt
+
+#====GITHUB======
+
+# estado de la branch
+git status
+
+# guardar cambios
+git add 
+
+#comentar cambios
+git commit -m
