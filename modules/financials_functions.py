@@ -34,7 +34,7 @@ def portfolio_volatility(
     vol = np.sqrt(varianza)
     return vol
 
-def portafolio_returns(
+def portfolio_returns(
         tickers: list,
         start: str,
         end: str

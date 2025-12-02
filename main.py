@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from modules.financials_functions import portfolio_volatility, portafolio_returns, VaR
+from modules.financials_functions import portfolio_volatility, portfolio_returns, VaR
 from modules.backend import tickers_by_issuer
 
 
@@ -28,7 +28,7 @@ if __name__ == '__main__':
         print(portafolio)
       
       # obtener retornos
-      df = portafolio_returns(tickers=portafolio, start=start, end=end)
+      df = portfolio_returns(tickers=portafolio, start=start, end=end)
       print(df.head(5))
 
       vector_w = np.array([1/len(portafolio)]*len(portafolio))
