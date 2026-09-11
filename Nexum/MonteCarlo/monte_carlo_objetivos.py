@@ -1,11 +1,19 @@
 """
-Modelo Nexum - simulacion de Montecarlo sobre viabilidad de objetivos (v3).
+Modelo Nexum - simulacion de Montecarlo sobre viabilidad de objetivos (v4).
 
-v3: nucleo pasivo (bonos TLH + SPY, con glide path que baja el riesgo a medida
-que se acercan los pagos) dedicado 100% a Educacion; satelite activo (Momentum
-acciones + BAB + Momentum commodities) dedicado 100% a Propiedad + Herencia,
-financiado con los aportes anuales. Bootstrap de retornos mensuales historicos
-(no normal parametrico) sobre ambos sub-carteras.
+v4: Educacion (prioridad 1, horizonte mas corto: primer pago en el anio 14)
+se financia con un CALCE EXACTO de bonos cupon-cero/TIPS mantenidos a
+vencimiento -- deterministico, no requiere Montecarlo (ver
+calcular_educacion_calce_exacto() y 09_Optimizador_Cartera seccion 2a).
+Propiedad + Herencia (prioridades 2-3) se financian con el satelite activo
+(Momentum acciones + BAB + Momentum commodities), que SI requiere Montecarlo
+porque busca crecimiento, no certeza (simulate_satelite()).
+
+PLAN_B: si en la practica no se consigue el calce exacto (liquidez,
+vencimientos disponibles en la plataforma), simulate_educacion_plan_b()
+corre el respaldo: ETF de bonos (TLH) + SPY con glide path, que si tiene
+riesgo de mercado -- ver 09_Optimizador_Cartera seccion 2b y 10_Monte_Carlo
+seccion 3.
 
 Todo en USD REALES (dinero de hoy): los retornos historicos (nominales) se
 deflactan con el supuesto de inflacion de largo plazo del modelo
@@ -14,7 +22,7 @@ deflactan con el supuesto de inflacion de largo plazo del modelo
 Requiere: pandas, numpy. Re-correr con datos propios reemplazando
 monthly_returns_all.csv (generado a partir de 05_Datos_Historicos y
 07_Backtest_CMD) una vez que existan backtests reales de Momentum/BAB o
-datos de TIPS para el nucleo pasivo.
+datos de TIPS para el calce de Educacion.
 """
 
 import numpy as np
@@ -27,9 +35,10 @@ MONTHLY_INFLATION = (1 + INFLATION_ANNUAL) ** (1 / 12) - 1
 
 VP_PASIVO_EDUCACION = 92747.03454098242    # 02_TIR_Objetivos!I7
 CAPITAL_TOTAL = 150000.0                    # 00_Inputs!D24
-LDI_BUFFER = 1.30                           # 09_Optimizador_Cartera!D10 (PENDIENTE de confirmar con el cliente/IPS)
-CAPITAL_NUCLEO = VP_PASIVO_EDUCACION * LDI_BUFFER
-CAPITAL_SATELITE = CAPITAL_TOTAL - CAPITAL_NUCLEO
+# v4: Educacion se financia EXACTO por el VP del pasivo (calce a vencimiento,
+# sin buffer -- ver calcular_educacion_calce_exacto()). Todo el resto va al
+# satelite activo. El buffer solo aplica al Plan B (simulate_educacion_plan_b).
+CAPITAL_SATELITE = CAPITAL_TOTAL - VP_PASIVO_EDUCACION
 
 APORTE_ANUAL = 10000.0                # 00_Inputs!D25
 N_APORTES = 19                        # 00_Inputs!D26
@@ -94,9 +103,25 @@ def load_satelite_returns():
     return deflate(port_nominal)
 
 
-def simulate_nucleo(bond_real, spy_real, n_sims, rng):
+def calcular_educacion_calce_exacto(tasa_real=LDI_FORWARD_REAL_ANNUAL):
+    """Estrategia RECOMENDADA (09_Optimizador_Cartera seccion 2a): comprar
+    bonos cupon-cero/TIPS que vencen exactamente en cada fecha de pago, por
+    el monto exacto, y mantenerlos a vencimiento. Deterministico -- no hay
+    Montecarlo que correr: si se ejecuta el calce, la probabilidad es ~100%
+    (solo riesgo de default/ejecucion, no de mercado)."""
+    capital_requerido = sum(
+        PAGO_EDUC * n_pagos / (1 + tasa_real) ** year
+        for year, n_pagos in EDUCATION_SCHEDULE.items()
+    )
+    return capital_requerido  # == VP_PASIVO_EDUCACION por construccion
+
+
+def simulate_educacion_plan_b(bond_real, spy_real, n_sims, rng, buffer=1.0):
+    """PLAN B (09_Optimizador_Cartera seccion 2b): solo si no se consigue el
+    calce exacto. ETF de bonos + SPY con glide path, marcado a mercado -- SI
+    tiene riesgo de secuencia de retornos, por eso se simula."""
     n_months = 20 * 12
-    balance = np.full(n_sims, CAPITAL_NUCLEO)
+    balance = np.full(n_sims, VP_PASIVO_EDUCACION * buffer)
     shortfall = np.zeros(n_sims)
     fully_funded = np.ones(n_sims, dtype=bool)
     n = len(bond_real)
@@ -161,24 +186,26 @@ def main():
     bond_real, spy_real = load_nucleo_series()
     satelite_rets = load_satelite_returns()
 
-    print(f"Capital nucleo pasivo (Educacion): ${CAPITAL_NUCLEO:,.0f}  "
-          f"(VP ${VP_PASIVO_EDUCACION:,.0f} x buffer {LDI_BUFFER:.2f})")
+    capital_educacion = calcular_educacion_calce_exacto()
+    print(f"Capital Educacion (calce exacto, seccion 2a): ${capital_educacion:,.0f}")
+    print(f"  -> Con calce exacto la probabilidad de exito es ~100% (deterministico).")
+    print(f"  -> Plan B (seccion 2b, ETF+glide path) se corre por separado si el calce no es viable.")
     print(f"Capital satelite activo (Propiedad+Herencia): ${CAPITAL_SATELITE:,.0f}")
-    print(f"Retorno real SPY usado: {'media historica cruda' if SPY_REAL_ANNUAL is None else f'{SPY_REAL_ANNUAL*100:.1f}%/año (recentrado)'}")
-    print(f"Simulaciones: {N_SIMS:,}\n")
+    print(f"Simulaciones (solo para el satelite y el Plan B): {N_SIMS:,}\n")
 
-    nucleo_balance, nucleo_shortfall, nucleo_ok = simulate_nucleo(bond_real, spy_real, N_SIMS, rng)
     satelite = simulate_satelite(satelite_rets, N_SIMS, rng)
 
-    all_ok = nucleo_ok & satelite["villarrica_ok"] & satelite["herencia_ok"]
-
     print("=== RESULTADOS ===\n")
-    print(f"Educacion (Vicente + Emilia) financiada en su totalidad: {pct(nucleo_ok.mean())}")
-    if (~nucleo_ok).any():
-        print(f"  Shortfall promedio cuando falla: ${nucleo_shortfall[~nucleo_ok].mean():,.0f}")
-    print(f"  Percentil 10 / 50 / 90 del saldo final (tras ultimo pago): "
-          f"${np.percentile(nucleo_balance,10):,.0f} / ${np.percentile(nucleo_balance,50):,.0f} / "
-          f"${np.percentile(nucleo_balance,90):,.0f}\n")
+    print("Educacion (Vicente + Emilia): ~100% si se ejecuta el calce exacto (ver seccion 2a; no es una simulacion).\n")
+
+    print("--- Plan B (respaldo si Educacion NO se puede calzar exacto) ---")
+    rng_b = np.random.default_rng(SEED)
+    plan_b_balance, plan_b_shortfall, plan_b_ok = simulate_educacion_plan_b(bond_real, spy_real, N_SIMS, rng_b)
+    print(f"Educacion via ETF+glide path (Plan B): {pct(plan_b_ok.mean())}")
+    if (~plan_b_ok).any():
+        print(f"  Shortfall promedio cuando falla: ${plan_b_shortfall[~plan_b_ok].mean():,.0f}\n")
+
+    all_ok = plan_b_ok & satelite["villarrica_ok"] & satelite["herencia_ok"]  # solo para comparacion con version Plan B
 
     print(f"Propiedad Villarrica (año 25) financiada en su totalidad: {pct(satelite['villarrica_ok'].mean())}")
     vs = satelite["villarrica_shortfall"]
@@ -197,19 +224,22 @@ def main():
           f"${np.percentile(satelite['final_balance'],50):,.0f} / "
           f"${np.percentile(satelite['final_balance'],90):,.0f}\n")
 
-    print(f"LOS TRES OBJETIVOS CUMPLIDOS EN SU TOTALIDAD: {pct(all_ok.mean())}")
+    print(f"\nLOS TRES OBJETIVOS CUMPLIDOS EN SU TOTALIDAD (con calce exacto en Educacion): "
+          f"{pct((satelite['villarrica_ok'] & satelite['herencia_ok']).mean())}  "
+          f"(Educacion aporta ~100% si se ejecuta el calce; el limite lo ponen Propiedad/Herencia)")
+    print(f"LOS TRES OBJETIVOS, SI SE USA EL PLAN B PARA EDUCACION: {pct(all_ok.mean())}")
 
     out = pd.DataFrame({
-        "nucleo_balance_final": nucleo_balance,
-        "nucleo_shortfall": nucleo_shortfall,
-        "educacion_ok": nucleo_ok,
+        "plan_b_balance_final": plan_b_balance,
+        "plan_b_shortfall": plan_b_shortfall,
+        "plan_b_educacion_ok": plan_b_ok,
         "satelite_balance_25": satelite["balance_before_25"],
         "villarrica_ok": satelite["villarrica_ok"],
         "villarrica_shortfall": satelite["villarrica_shortfall"],
         "satelite_balance_final": satelite["final_balance"],
         "herencia_ok": satelite["herencia_ok"],
         "herencia_shortfall": satelite["herencia_shortfall"],
-        "todos_ok": all_ok,
+        "todos_ok_plan_b": all_ok,
     })
     out.to_csv("monte_carlo_resultados.csv", index=False)
     print("\nDetalle de las simulaciones guardado en monte_carlo_resultados.csv")
